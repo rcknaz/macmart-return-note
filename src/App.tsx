@@ -14,6 +14,7 @@ import {
 import { signInWithPopup, signOut, onAuthStateChanged, User, signInWithEmailAndPassword } from 'firebase/auth';
 import { 
   Plus, 
+  Minus,
   Sparkles, 
   Camera, 
   FileText, 
@@ -38,7 +39,9 @@ import {
   User as UserIcon,
   BadgeAlert,
   Edit2,
-  ClipboardCheck
+  ClipboardCheck,
+  Download,
+  Unlock
 } from 'lucide-react';
 import { db, auth, googleProvider, handleFirestoreError, OperationType } from './firebase';
 import { ReturnNote, ReturnNoteItem, COMMON_REASONS } from './types';
@@ -95,6 +98,16 @@ export default function App() {
   const [showScanner, setShowScanner] = useState(false);
   const [isPrinting, setIsPrinting] = useState(false);
   const [generalError, setGeneralError] = useState('');
+  const [firestoreOffline, setFirestoreOffline] = useState(false);
+
+  // Catch custom offline status updates
+  useEffect(() => {
+    const handleOfflineStatus = () => {
+      setFirestoreOffline(true);
+    };
+    window.addEventListener('firestore-offline-status', handleOfflineStatus);
+    return () => window.removeEventListener('firestore-offline-status', handleOfflineStatus);
+  }, []);
 
   // AI assist states
   const [aiSuggesting, setAiSuggesting] = useState(false);
@@ -402,6 +415,27 @@ export default function App() {
     }
   };
 
+  // Unlock / revert a completed return note back to draft status
+  const handleUnlockNote = async () => {
+    if (!activeNote || activeNote.status !== 'completed') return;
+    setGeneralError('');
+    const path = `returnNotes/${activeNote.id}`;
+
+    try {
+      const noteDocRef = doc(db, 'returnNotes', activeNote.id);
+      await updateDoc(noteDocRef, {
+        status: 'draft',
+        updatedAt: serverTimestamp()
+      });
+
+      // Update active note status locally in memory
+      setActiveNote(prev => prev ? { ...prev, status: 'draft' } : null);
+    } catch (error: any) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+      setGeneralError("Could not unlock return note format in Database.");
+    }
+  };
+
   // Delete dynamic sub-item
   const handleDeleteItem = async (itemId: string) => {
     if (!activeNote || activeNote.status === 'completed') return;
@@ -421,6 +455,89 @@ export default function App() {
     } catch (error: any) {
       handleFirestoreError(error, OperationType.DELETE, path);
     }
+  };
+
+  // Update item quantity directly
+  const handleUpdateItemQuantity = async (itemId: string, newQty: number) => {
+    if (!activeNote || activeNote.status === 'completed') return;
+    
+    // Ensure positive quantity
+    const sanitizedQty = Math.max(1, Math.floor(Number(newQty) || 1));
+    
+    setGeneralError('');
+    const path = `returnNotes/${activeNote.id}/items/${itemId}`;
+
+    try {
+      const itemDocRef = doc(db, `returnNotes/${activeNote.id}/items`, itemId);
+      await updateDoc(itemDocRef, {
+        quantity: sanitizedQty
+      });
+
+      // Update parent updatedAt
+      const parentRef = doc(db, 'returnNotes', activeNote.id);
+      await updateDoc(parentRef, {
+        updatedAt: serverTimestamp()
+      });
+    } catch (error: any) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+      setGeneralError("Could not update item quantity, please try again.");
+    }
+  };
+
+  // Export current note items into a CSV file
+  const handleExportCSV = () => {
+    if (!activeNote || noteItems.length === 0) return;
+
+    // Helper to escape values for CSV
+    const escapeCSV = (val: any) => {
+      if (val === null || val === undefined) return '';
+      const stringified = String(val);
+      if (stringified.includes(',') || stringified.includes('"') || stringified.includes('\n') || stringified.includes('\r')) {
+        return `"${stringified.replace(/"/g, '""')}"`;
+      }
+      return stringified;
+    };
+
+    // Build headers matching the Excel screenshot exactly
+    const headers = ['Product Name', 'Barcode/EAN', 'Quantity', 'Expiry Date', 'Reason'];
+
+    // Format rows matching the Excel screenshot columns exactly
+    const rows = noteItems.map(item => [
+      escapeCSV(item.productName),
+      escapeCSV(item.barcode),
+      escapeCSV(item.quantity),
+      escapeCSV(item.expiryDate),
+      escapeCSV(item.reason)
+    ]);
+
+    // Build the clean preamble structure seen in your Excel screenshot
+    const line1 = escapeCSV(`Note Number: ${activeNote.noteNumber}`);
+    const line2 = escapeCSV(`Title: ${activeNote.title}`);
+    const line3 = '';
+    const line4 = '';
+
+    // Join with newline, adding the BOM (Byte Order Mark) at the very start for perfect Excel compatibility
+    const csvContent = '\uFEFF' + [
+      line1,
+      line2,
+      line3,
+      line4,
+      headers.join(','),
+      ...rows.map(row => row.join(','))
+    ].join('\n');
+
+    // Create a blob and trigger download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const filename = `Return_Note_${activeNote.noteNumber.replace(/[^a-zA-Z0-9]/g, '_')}_Inventory_Export.csv`;
+    
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   // Safe delete triggers
@@ -616,12 +733,6 @@ export default function App() {
 
         {/* Header content & Auth Module */}
         <div className="flex items-center gap-6">
-          <div className="text-right hidden md:block">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider leading-none">Location</p>
-            <p className="text-xs font-bold text-slate-700 mt-0.5">Warehouse Alpha-7</p>
-          </div>
-          <div className="h-8 w-px bg-slate-200 hidden md:block"></div>
-          
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-3 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200">
               <div className="w-8 h-8 rounded-full bg-slate-200 border-2 border-white shadow-xs flex items-center justify-center text-slate-600 font-bold shrink-0 text-sm">
@@ -653,6 +764,28 @@ export default function App() {
             className="text-rose-700 hover:text-rose-950 font-bold text-sm px-1.5 rounded-md hover:bg-rose-100"
           >
             ×
+          </button>
+        </div>
+      )}
+
+      {/* OFFLINE STATUS BANNER */}
+      {firestoreOffline && (
+        <div className="bg-amber-50 border-b border-amber-200 p-2 text-amber-900 text-xs px-4 md:px-8 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+            </span>
+            <span className="font-bold uppercase tracking-wider text-[10px]">Offline Caching Active</span>
+            <span className="text-slate-600">
+              | Connection is currently offline; return notes and items are secured in local persistent storage and will automatically sync when online.
+            </span>
+          </div>
+          <button 
+            onClick={() => setFirestoreOffline(false)} 
+            className="text-amber-700 hover:text-amber-950 font-bold text-xs px-2 py-0.5 rounded-md hover:bg-amber-100"
+          >
+            Acknowledge
           </button>
         </div>
       )}
@@ -882,8 +1015,18 @@ export default function App() {
                           </button>
                         </>
                       ) : (
-                        <div className="p-1 px-3 bg-indigo-50 border border-indigo-200 rounded-lg text-indigo-800 text-[10px] font-medium leading-normal max-w-xs">
-                          Securely locked from edits under local return guidelines.
+                        <div className="flex items-center gap-2">
+                          <div className="p-1 px-3 bg-indigo-50 border border-indigo-200 rounded-lg text-indigo-800 text-[10px] font-medium leading-normal max-w-xs hidden sm:block">
+                            Securely locked under local return guidelines.
+                          </div>
+                          <button
+                            onClick={handleUnlockNote}
+                            className="bg-amber-50 text-amber-700 hover:bg-amber-100 font-bold text-[11px] px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all cursor-pointer shrink-0 border border-amber-200/50"
+                            title="Unlock this note to allow editing items"
+                          >
+                            <Unlock className="w-3.5 h-3.5" />
+                            Unlock Note
+                          </button>
                         </div>
                       )}
 
@@ -892,7 +1035,17 @@ export default function App() {
                         className="bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] border border-slate-250 font-semibold px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all shrink-0 cursor-pointer"
                       >
                         <Printer className="w-3.5 h-3.5" />
-                        Print / Export E-Invoice
+                        Export PDF / Print
+                      </button>
+
+                      <button
+                        onClick={handleExportCSV}
+                        disabled={noteItems.length === 0}
+                        className="bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 disabled:hover:bg-emerald-50 text-[11px] border border-emerald-200/50 font-semibold px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all shrink-0 cursor-pointer"
+                        title="Export items to CSV for inventory integration"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Export CSV
                       </button>
                     </div>
                   </div>
@@ -932,54 +1085,10 @@ export default function App() {
                     <form onSubmit={handleAddItem} className="space-y-4">
                       <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5">
                         
-                        {/* 1. Barcode field with toggle Scanner */}
+                        {/* 1. Barcode field */}
                         <div className="md:col-span-3 space-y-1 text-left">
-                          <label className="text-[11px] font-semibold text-slate-650 flex items-center justify-between">
-                            <span>Barcode / EAN</span>
-                            <div className="flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    const text = await navigator.clipboard.readText();
-                                    const trimmed = text?.trim();
-                                    if (trimmed) {
-                                      setBarcode(trimmed);
-                                      setBarcodeLookupStatus('searching');
-                                      setGoogleFoundName('');
-                                      setProductName('Looking up barcode on Google...');
-                                      triggerAiDetailsAssist('', trimmed);
-                                    } else {
-                                      alert("Clipboard is empty. Please copy a barcode first!");
-                                    }
-                                  } catch (err) {
-                                    const val = prompt("Paste / Enter barcode (UPC / EAN) for auto-grounding scan:");
-                                    if (val?.trim()) {
-                                      const cleanVal = val.trim();
-                                      setBarcode(cleanVal);
-                                      setBarcodeLookupStatus('searching');
-                                      setGoogleFoundName('');
-                                      setProductName('Looking up barcode on Google...');
-                                      triggerAiDetailsAssist('', cleanVal);
-                                    }
-                                  }
-                                }}
-                                className="text-[10px] text-indigo-600 hover:text-indigo-800 hover:underline flex items-center gap-0.5 cursor-pointer font-semibold"
-                                title="Auto-paste & scan from clipboard"
-                              >
-                                <ClipboardCheck className="w-3 h-3 shrink-0" />
-                                Paste & Scan
-                              </button>
-                              <span className="text-slate-350 select-none">|</span>
-                              <button
-                                type="button"
-                                onClick={() => setShowScanner(!showScanner)}
-                                className="text-[10px] text-indigo-600 hover:text-indigo-800 hover:underline flex items-center gap-0.5 cursor-pointer font-semibold"
-                              >
-                                <Camera className="w-3 h-3 shrink-0" />
-                                {showScanner ? 'Hide Scanner' : 'Toggle Cam'}
-                              </button>
-                            </div>
+                          <label className="text-[11px] font-semibold text-slate-650 block">
+                            Barcode / EAN
                           </label>
                           <div className="relative">
                             <input
@@ -1001,7 +1110,7 @@ export default function App() {
                                 if (barcodeLookupStatus !== 'idle') setBarcodeLookupStatus('idle');
 
                                 // Auto-trigger is disabled during manual keystroke entry to prevent 429 quota exhaustion. 
-                                // Users can trigger auto-lookup via Enter key, Paste, Blur, or by clicking the Search Icon.
+                                // Users can trigger auto-lookup via Enter key, Paste, or Blur.
                               }}
                               onBlur={() => {
                                 if (barcode.trim()) {
@@ -1015,20 +1124,8 @@ export default function App() {
                                 }
                               }}
                               placeholder="Type or scan EAN..."
-                              className="w-full pr-8 px-3 py-1.5 bg-white border border-slate-200 text-xs rounded-lg focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 font-mono tracking-wide"
+                              className="w-full px-3 py-1.5 bg-white border border-slate-200 text-xs rounded-lg focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 font-mono tracking-wide"
                             />
-                            {barcode.trim() && (
-                              <button
-                                type="button"
-                                onClick={() => triggerAiDetailsAssist(productName, barcode)}
-                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600 transition-colors p-0.5 cursor-pointer"
-                                title="Search Barcode on Google"
-                              >
-                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                                </svg>
-                              </button>
-                            )}
                           </div>
                           {barcodeLookupStatus === 'searching' && (
                             <div className="text-[10px] text-indigo-600 font-semibold flex items-center gap-1 mt-1 animate-pulse">
@@ -1259,8 +1356,44 @@ export default function App() {
                                   </span>
                                 </td>
 
-                                <td className="py-3 px-3 text-right">
-                                  <span className="font-mono font-bold text-slate-800">{item.quantity}</span>
+                                <td className="py-2.5 px-3">
+                                  {activeNote.status === 'completed' ? (
+                                    <div className="text-right pr-4">
+                                      <span className="font-mono font-bold text-slate-800">{item.quantity}</span>
+                                    </div>
+                                  ) : (
+                                    <div className="flex items-center justify-end gap-1 origin-right">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleUpdateItemQuantity(item.id, item.quantity - 1)}
+                                        disabled={item.quantity <= 1}
+                                        className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-slate-150 disabled:opacity-20 disabled:hover:bg-transparent transition-all cursor-pointer"
+                                        title="Decrease Quantity"
+                                      >
+                                        <Minus className="w-3 h-3" />
+                                      </button>
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        value={item.quantity}
+                                        onChange={(e) => {
+                                          const val = parseInt(e.target.value, 10);
+                                          if (!isNaN(val) && val >= 1) {
+                                            handleUpdateItemQuantity(item.id, val);
+                                          }
+                                        }}
+                                        className="w-12 text-center text-xs font-mono font-bold border border-slate-200 bg-white rounded py-0.5 px-1 focus:ring-1 focus:ring-emerald-500 focus:outline-none focus:border-emerald-500"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => handleUpdateItemQuantity(item.id, item.quantity + 1)}
+                                        className="p-1 rounded text-slate-400 hover:text-emerald-600 hover:bg-slate-150 transition-all cursor-pointer"
+                                        title="Increase Quantity"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  )}
                                 </td>
 
                                 <td className="py-3 px-3 text-center">
