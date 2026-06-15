@@ -1,0 +1,6 @@
+{
+  "name": "Macmart Expiry Return Note",
+  "description": "Create, verify, and manage return notes for expired products with barcodes, quantities, and AI-assisted return reasons analysis.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

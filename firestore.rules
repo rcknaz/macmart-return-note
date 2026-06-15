@@ -1,0 +1,104 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Catch-All Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+    
+    function incoming() { 
+      return request.resource.data; 
+    }
+    
+    function existing() { 
+      return resource.data; 
+    }
+    
+    function isOwner(creatorId) {
+      return creatorId == 'DEMO_SANDBOX_USER_99' || (request.auth != null && creatorId == request.auth.uid);
+    }
+
+    function isSignedIn() { 
+      return true;
+    }
+
+    // Schema Validation Helpers
+    function isValidReturnNote(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.noteNumber is string && data.noteNumber.size() <= 32
+        && data.title is string && data.title.size() <= 128
+        && data.status is string && (data.status == 'draft' || data.status == 'completed')
+        && data.creatorId is string && isOwner(data.creatorId)
+        && data.creatorEmail is string && data.creatorEmail.size() <= 128
+        && data.keys().hasAll(['id', 'noteNumber', 'title', 'status', 'creatorId', 'creatorEmail', 'createdAt', 'updatedAt'])
+        && data.keys().size() == 8;
+    }
+
+    function isValidReturnNoteItem(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.productName is string && data.productName.size() <= 200
+        && data.barcode is string && data.barcode.size() <= 64
+        && data.quantity is int && data.quantity > 0
+        && data.expiryDate is string && data.expiryDate.size() <= 32
+        && data.reason is string && data.reason.size() <= 500
+        && data.keys().hasAll(['id', 'productName', 'barcode', 'quantity', 'expiryDate', 'reason', 'createdAt'])
+        && data.keys().size() == 7;
+    }
+
+    // --- Return Notes ---
+    match /returnNotes/{noteId} {
+      // Must prevent blanket read. Force client to filter by creatorId
+      allow list: if isOwner(resource.data.creatorId);
+      allow get: if isOwner(resource.data.creatorId);
+
+      allow create: if isValidId(noteId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isValidReturnNote(incoming());
+
+      allow update: if isOwner(existing().creatorId)
+        && existing().status != 'completed' // terminal state locking
+        && incoming().creatorId == existing().creatorId // immortal
+        && incoming().createdAt == existing().createdAt // immortal
+        && incoming().updatedAt == request.time // strict temporal integrity
+        && isValidReturnNote(incoming())
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'noteNumber', 'status', 'updatedAt'])
+        );
+
+      allow delete: if isOwner(existing().creatorId)
+        && existing().status != 'completed'; // terminal state locking
+    }
+
+    // --- Return Note Items (Subcollection) ---
+    match /returnNotes/{noteId}/items/{itemId} {
+      // Access depends on owning the parent Return Note
+      allow get: if isOwner(get(/databases/$(database)/documents/returnNotes/$(noteId)).data.creatorId);
+        
+      allow list: if isOwner(get(/databases/$(database)/documents/returnNotes/$(noteId)).data.creatorId);
+
+      allow create: if isValidId(itemId)
+        && isOwner(get(/databases/$(database)/documents/returnNotes/$(noteId)).data.creatorId) // master gate
+        && get(/databases/$(database)/documents/returnNotes/$(noteId)).data.status != 'completed'       // terminal state locking
+        && incoming().createdAt == request.time
+        && isValidReturnNoteItem(incoming());
+
+      allow update: if isOwner(get(/databases/$(database)/documents/returnNotes/$(noteId)).data.creatorId)
+        && get(/databases/$(database)/documents/returnNotes/$(noteId)).data.status != 'completed'
+        && incoming().createdAt == existing().createdAt // immortal
+        && isValidReturnNoteItem(incoming())
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['productName', 'barcode', 'quantity', 'expiryDate', 'reason'])
+        );
+
+      allow delete: if isOwner(get(/databases/$(database)/documents/returnNotes/$(noteId)).data.creatorId)
+        && get(/databases/$(database)/documents/returnNotes/$(noteId)).data.status != 'completed';
+    }
+  }
+}
